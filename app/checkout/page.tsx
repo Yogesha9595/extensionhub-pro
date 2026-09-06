@@ -9,6 +9,7 @@ import {
 import {
   initializePaddle,
   type Paddle,
+  type PaddleEventData,
 } from "@paddle/paddle-js";
 
 
@@ -20,7 +21,23 @@ type CheckoutState =
   | "loading"
   | "opening"
   | "completed"
+  | "cancelled"
   | "error";
+
+
+type CheckoutError =
+  | "missing_transaction"
+  | "missing_configuration"
+  | "initialization_failed"
+  | "checkout_failed"
+  | null;
+
+
+/* ========================================================================== */
+/* CONSTANTS                                                                  */
+/* ========================================================================== */
+
+const SUCCESS_REDIRECT_DELAY = 1000;
 
 
 /* ========================================================================== */
@@ -28,6 +45,10 @@ type CheckoutState =
 /* ========================================================================== */
 
 export default function CheckoutPage() {
+
+  /* ======================================================================== */
+  /* STATE                                                                    */
+  /* ======================================================================== */
 
   const [
     state,
@@ -47,18 +68,25 @@ export default function CheckoutPage() {
     );
 
 
-  /*
-   * Prevent checkout.completed
-   * from being processed multiple times.
-   */
-  const completionHandledRef =
-    useRef(
-      false,
+  const [
+    errorType,
+    setErrorType,
+  ] =
+    useState<CheckoutError>(
+      null,
     );
 
 
+  /* ======================================================================== */
+  /* REFS                                                                     */
+  /* ======================================================================== */
+
   /*
-   * Prevent duplicate checkout opening.
+   * Prevent duplicate Paddle checkout initialization.
+   *
+   * This is especially important because
+   * React Strict Mode can execute effects
+   * more than once in development.
    */
   const checkoutStartedRef =
     useRef(
@@ -67,21 +95,41 @@ export default function CheckoutPage() {
 
 
   /*
-   * Track whether the component
-   * is still mounted.
+   * Prevent duplicate payment completion handling.
    */
-  const isMountedRef =
+  const completionHandledRef =
     useRef(
-      true,
+      false,
     );
 
 
   /*
-   * Store Paddle instance.
+   * Track component lifecycle.
+   */
+  const isMountedRef =
+    useRef(
+      false,
+    );
+
+
+  /*
+   * Store the active Paddle instance.
    */
   const paddleRef =
     useRef<
       Paddle | null
+    >(
+      null,
+    );
+
+
+  /*
+   * Store the redirect timer.
+   */
+  const redirectTimeoutRef =
+    useRef<
+      ReturnType<typeof setTimeout>
+      | null
     >(
       null,
     );
@@ -98,431 +146,15 @@ export default function CheckoutPage() {
         true;
 
 
-      let redirectTimeout:
-        ReturnType<typeof setTimeout>
-        | null =
-        null;
-
-
-      async function openCheckout() {
-
-        try {
-
-          /* ================================================================ */
-          /* PREVENT DUPLICATE EXECUTION                                     */
-          /* ================================================================ */
-
-          if (
-            checkoutStartedRef.current
-          ) {
-
-            return;
-
-          }
-
-
-          checkoutStartedRef.current =
-            true;
-
-
-          /* ================================================================ */
-          /* READ TRANSACTION ID                                             */
-          /* ================================================================ */
-
-          const searchParams =
-            new URLSearchParams(
-              window.location.search,
-            );
-
-
-          const transactionId =
-            searchParams.get(
-              "_ptxn",
-            );
-
-
-          if (
-            !transactionId
-          ) {
-
-            throw new Error(
-              "Missing Paddle transaction ID.",
-            );
-
-          }
-
-
-          console.log(
-            "[ExtensionHub Checkout] Transaction ID:",
-            transactionId,
-          );
-
-
-          /* ================================================================ */
-          /* READ PADDLE CONFIG                                              */
-          /* ================================================================ */
-
-          const clientToken =
-            process.env
-              .NEXT_PUBLIC_PADDLE_CLIENT_TOKEN;
-
-
-          const rawEnvironment =
-            process.env
-              .NEXT_PUBLIC_PADDLE_ENVIRONMENT;
-
-
-          const environment =
-            rawEnvironment ===
-            "sandbox"
-              ? "sandbox"
-              : "production";
-
-
-          if (
-            !clientToken
-          ) {
-
-            throw new Error(
-              "Paddle client token is not configured.",
-            );
-
-          }
-
-
-          console.log(
-            "[ExtensionHub Checkout] Configuration:",
-            {
-              environment,
-
-              hasClientToken:
-                Boolean(
-                  clientToken,
-                ),
-
-              transactionId,
-            },
-          );
-
-
-          /* ================================================================ */
-          /* UPDATE PAGE STATE                                               */
-          /* ================================================================ */
-
-          if (
-            isMountedRef.current
-          ) {
-
-            setState(
-              "opening",
-            );
-
-          }
-
-
-          /* ================================================================ */
-          /* INITIALIZE PADDLE                                               */
-          /* ================================================================ */
-
-          const paddleInstance =
-            await initializePaddle({
-
-              token:
-                clientToken,
-
-
-              environment,
-
-
-              /* ============================================================ */
-              /* EVENT CALLBACK                                              */
-              /* ============================================================ */
-
-              eventCallback:
-                (
-                  event,
-                ) => {
-
-                  console.log(
-                    "[ExtensionHub Paddle] Event:",
-                    event.name,
-                    event.data,
-                  );
-
-
-                  /* ======================================================== */
-                  /* PAYMENT COMPLETED                                       */
-                  /* ======================================================== */
-
-                  if (
-                    event.name ===
-                    "checkout.completed"
-                  ) {
-
-                    if (
-                      completionHandledRef.current
-                    ) {
-
-                      console.log(
-                        "[ExtensionHub Paddle] Completion already handled.",
-                      );
-
-                      return;
-
-                    }
-
-
-                    completionHandledRef.current =
-                      true;
-
-
-                    console.log(
-                      "[ExtensionHub Paddle] Payment completed successfully.",
-                    );
-
-
-                    if (
-                      isMountedRef.current
-                    ) {
-
-                      setState(
-                        "completed",
-                      );
-
-                    }
-
-
-                    /* ------------------------------------------------------ */
-                    /* GET COMPLETED TRANSACTION ID                          */
-                    /* ------------------------------------------------------ */
-
-                    const completedTransactionId =
-                      event.data
-                        ?.transaction_id
-                      ??
-                      transactionId;
-
-
-                    /* ------------------------------------------------------ */
-                    /* REDIRECT TO SUCCESS PAGE                              */
-                    /* ------------------------------------------------------ */
-
-                    redirectTimeout =
-                      setTimeout(
-                        () => {
-
-                          console.log(
-                            "[ExtensionHub Checkout] Redirecting to success page.",
-                          );
-
-
-                          /*
-                           * Close Paddle checkout.
-                           */
-
-                          try {
-
-                            paddleRef
-                              .current
-                              ?.Checkout
-                              .close();
-
-                          } catch (
-                            closeError
-                          ) {
-
-                            console.warn(
-                              "[ExtensionHub Checkout] Unable to close Paddle checkout:",
-                              closeError,
-                            );
-
-                          }
-
-
-                          /*
-                           * Navigate to success page.
-                           */
-
-                          window.location.replace(
-                            `/checkout/success?transaction=${encodeURIComponent(
-                              completedTransactionId,
-                            )}`,
-                          );
-
-                        },
-                        1000,
-                      );
-
-
-                    return;
-
-                  }
-
-
-                  /* ======================================================== */
-                  /* CHECKOUT CLOSED                                         */
-                  /* ======================================================== */
-
-                  if (
-                    event.name ===
-                    "checkout.closed"
-                  ) {
-
-                    console.log(
-                      "[ExtensionHub Paddle] Checkout closed.",
-                    );
-
-
-                    /*
-                     * Ignore checkout.closed after
-                     * successful payment.
-                     */
-
-                    if (
-                      completionHandledRef.current
-                    ) {
-
-                      return;
-
-                    }
-
-
-                    /*
-                     * User closed checkout without payment.
-                     *
-                     * We intentionally keep the page open
-                     * so the user can use the browser Back
-                     * button or reload.
-                     */
-
-                    console.log(
-                      "[ExtensionHub Checkout] Checkout closed before payment.",
-                    );
-
-
-                    return;
-
-                  }
-
-
-                  /* ======================================================== */
-                  /* CHECKOUT ERROR                                          */
-                  /* ======================================================== */
-
-                  if (
-                    event.name ===
-                    "checkout.error"
-                  ) {
-
-                    console.error(
-                      "[ExtensionHub Paddle] Checkout error:",
-                      event.data,
-                    );
-
-                  }
-
-                },
-
-            });
-
-
-          /* ================================================================ */
-          /* VALIDATE PADDLE INSTANCE                                        */
-          /* ================================================================ */
-
-          if (
-            !paddleInstance
-          ) {
-
-            throw new Error(
-              "Failed to initialize Paddle.",
-            );
-
-          }
-
-
-          paddleRef.current =
-            paddleInstance;
-
-
-          /* ================================================================ */
-          /* CHECK COMPONENT LIFECYCLE                                       */
-          /* ================================================================ */
-
-          if (
-            !isMountedRef.current
-          ) {
-
-            return;
-
-          }
-
-
-          /* ================================================================ */
-          /* OPEN CHECKOUT                                                   */
-          /* ================================================================ */
-
-          console.log(
-            "[ExtensionHub Checkout] Opening Paddle checkout:",
-            transactionId,
-          );
-
-
-          paddleInstance
-            .Checkout
-            .open({
-
-              transactionId,
-
-            });
-
-
-          console.log(
-            "[ExtensionHub Checkout] Paddle checkout opened successfully.",
-          );
-
-        } catch (
-          caughtError
-        ) {
-
-          console.error(
-            "[ExtensionHub Checkout] Failed to open checkout:",
-            caughtError,
-          );
-
-
-          const message =
-            caughtError instanceof Error
-              ? caughtError.message
-              : "Unable to start secure checkout.";
-
-
-          if (
-            isMountedRef.current
-          ) {
-
-            setError(
-              message,
-            );
-
-
-            setState(
-              "error",
-            );
-
-          }
-
-        }
-
-      }
-
-
-      openCheckout();
-
-
-      /* ================================================================== */
-      /* CLEANUP                                                            */
-      /* ================================================================== */
+      /*
+       * Start checkout.
+       */
+      void startCheckout();
+
+
+      /* ==================================================================== */
+      /* CLEANUP                                                              */
+      /* ==================================================================== */
 
       return () => {
 
@@ -530,26 +162,34 @@ export default function CheckoutPage() {
           false;
 
 
+        /*
+         * Clear success redirect timer.
+         */
         if (
-          redirectTimeout
+          redirectTimeoutRef.current
         ) {
 
           clearTimeout(
-            redirectTimeout,
+            redirectTimeoutRef.current,
           );
+
+
+          redirectTimeoutRef.current =
+            null;
 
         }
 
 
         /*
-         * Do not automatically call
-         * Paddle.Checkout.close() here.
+         * IMPORTANT:
          *
-         * React Strict Mode can execute
-         * effect cleanup during development.
+         * Do NOT automatically call:
          *
-         * Automatically closing Paddle here
-         * can cause checkout to disappear.
+         * paddle.Checkout.close()
+         *
+         * React Strict Mode may execute cleanup
+         * during development and accidentally
+         * close the checkout overlay.
          */
 
       };
@@ -560,7 +200,722 @@ export default function CheckoutPage() {
 
 
   /* ======================================================================== */
-  /* LOADING / OPENING                                                        */
+  /* START CHECKOUT                                                           */
+  /* ======================================================================== */
+
+  async function startCheckout() {
+
+    try {
+
+      /* ==================================================================== */
+      /* PREVENT DUPLICATE EXECUTION                                         */
+      /* ==================================================================== */
+
+      if (
+        checkoutStartedRef.current
+      ) {
+
+        console.log(
+          "[ExtensionHub Checkout] Checkout already started.",
+        );
+
+
+        return;
+
+      }
+
+
+      checkoutStartedRef.current =
+        true;
+
+
+      /* ==================================================================== */
+      /* RESET STATE                                                         */
+      /* ==================================================================== */
+
+      if (
+        isMountedRef.current
+      ) {
+
+        setError(
+          null,
+        );
+
+
+        setErrorType(
+          null,
+        );
+
+
+        setState(
+          "opening",
+        );
+
+      }
+
+
+      /* ==================================================================== */
+      /* READ TRANSACTION ID                                                 */
+      /* ==================================================================== */
+
+      const searchParams =
+        new URLSearchParams(
+          window.location.search,
+        );
+
+
+      const transactionId =
+        searchParams
+          .get(
+            "_ptxn",
+          )
+          ?.trim();
+
+
+      /* ==================================================================== */
+      /* VALIDATE TRANSACTION ID                                             */
+      /* ==================================================================== */
+
+      if (
+        !transactionId
+      ) {
+
+        console.error(
+          "[ExtensionHub Checkout] Missing Paddle transaction ID.",
+        );
+
+
+        throw new CheckoutPageError(
+          "missing_transaction",
+          "This checkout link is missing a valid transaction ID.",
+        );
+
+      }
+
+
+      console.log(
+        "[ExtensionHub Checkout] Transaction detected:",
+        transactionId,
+      );
+
+
+      /* ==================================================================== */
+      /* READ PADDLE CONFIG                                                  */
+      /* ==================================================================== */
+
+      const clientToken =
+        process.env
+          .NEXT_PUBLIC_PADDLE_CLIENT_TOKEN;
+
+
+      const rawEnvironment =
+        process.env
+          .NEXT_PUBLIC_PADDLE_ENVIRONMENT;
+
+
+      /*
+       * Explicitly support only valid environments.
+       */
+      const environment =
+        rawEnvironment ===
+        "sandbox"
+          ? "sandbox"
+          : "production";
+
+
+      /* ==================================================================== */
+      /* VALIDATE PADDLE TOKEN                                               */
+      /* ==================================================================== */
+
+      if (
+        !clientToken
+      ) {
+
+        console.error(
+          "[ExtensionHub Checkout] Paddle client token is missing.",
+        );
+
+
+        throw new CheckoutPageError(
+          "missing_configuration",
+          "Secure checkout is temporarily unavailable. Please try again later.",
+        );
+
+      }
+
+
+      console.log(
+        "[ExtensionHub Checkout] Paddle configuration loaded:",
+        {
+          environment,
+
+          hasClientToken:
+            Boolean(
+              clientToken,
+            ),
+
+          transactionId,
+        },
+      );
+
+
+      /* ==================================================================== */
+      /* INITIALIZE PADDLE                                                   */
+      /* ==================================================================== */
+
+      console.log(
+        "[ExtensionHub Checkout] Initializing Paddle...",
+      );
+
+
+      const paddleInstance =
+        await initializePaddle({
+
+          token:
+            clientToken,
+
+
+          environment,
+
+
+          /* ================================================================ */
+          /* EVENT CALLBACK                                                  */
+          /* ================================================================ */
+
+          eventCallback:
+            (
+              event,
+            ) => {
+
+              handlePaddleEvent(
+                event,
+                transactionId,
+              );
+
+            },
+
+        });
+
+
+      /* ==================================================================== */
+      /* CHECK COMPONENT LIFECYCLE                                           */
+      /* ==================================================================== */
+
+      if (
+        !isMountedRef.current
+      ) {
+
+        console.log(
+          "[ExtensionHub Checkout] Component unmounted during initialization.",
+        );
+
+
+        return;
+
+      }
+
+
+      /* ==================================================================== */
+      /* VALIDATE PADDLE INSTANCE                                            */
+      /* ==================================================================== */
+
+      if (
+        !paddleInstance
+      ) {
+
+        throw new CheckoutPageError(
+          "initialization_failed",
+          "Unable to initialize secure checkout.",
+        );
+
+      }
+
+
+      /* ==================================================================== */
+      /* STORE PADDLE INSTANCE                                               */
+      /* ==================================================================== */
+
+      paddleRef.current =
+        paddleInstance;
+
+
+      /* ==================================================================== */
+      /* OPEN CHECKOUT                                                       */
+      /* ==================================================================== */
+
+      console.log(
+        "[ExtensionHub Checkout] Opening Paddle checkout:",
+        transactionId,
+      );
+
+
+      paddleInstance
+        .Checkout
+        .open({
+
+          transactionId,
+
+        });
+
+
+      console.log(
+        "[ExtensionHub Checkout] Paddle checkout opened successfully.",
+      );
+
+    } catch (
+      caughtError
+    ) {
+
+      handleCheckoutError(
+        caughtError,
+      );
+
+    }
+
+  }
+
+/* ======================================================================== */
+/* HANDLE PADDLE EVENTS                                                     */
+/* ======================================================================== */
+
+function handlePaddleEvent(
+  event: PaddleEventData,
+  fallbackTransactionId: string,
+) {
+
+  /* ====================================================================== */
+  /* VALIDATE EVENT                                                         */
+  /* ====================================================================== */
+
+  if (
+    !event.name
+  ) {
+
+    console.warn(
+      "[ExtensionHub Paddle] Received event without a name:",
+      event,
+    );
+
+    return;
+
+  }
+
+
+  console.log(
+    "[ExtensionHub Paddle] Event:",
+    event.name,
+    event.data,
+  );
+
+
+  /* ====================================================================== */
+  /* CHECKOUT COMPLETED                                                     */
+  /* ====================================================================== */
+
+  if (
+    event.name ===
+    "checkout.completed"
+  ) {
+
+    if (
+      completionHandledRef.current
+    ) {
+
+      console.log(
+        "[ExtensionHub Checkout] Completion already handled.",
+      );
+
+      return;
+
+    }
+
+
+    completionHandledRef.current =
+      true;
+
+
+    /*
+     * For Paddle's checkout.completed event,
+     * safely extract the transaction ID.
+     */
+
+    const completedTransactionId =
+      (
+        event.data as {
+          transaction_id?: string;
+        }
+      )?.transaction_id
+      ??
+      fallbackTransactionId;
+
+
+    console.log(
+      "[ExtensionHub Checkout] Payment completed:",
+      completedTransactionId,
+    );
+
+
+    handleCheckoutCompleted(
+      completedTransactionId,
+    );
+
+
+    return;
+
+  }
+
+
+  /* ====================================================================== */
+  /* CHECKOUT CLOSED                                                        */
+  /* ====================================================================== */
+
+  if (
+    event.name ===
+    "checkout.closed"
+  ) {
+
+    /*
+     * Ignore checkout.closed after
+     * successful payment.
+     */
+
+    if (
+      completionHandledRef.current
+    ) {
+
+      console.log(
+        "[ExtensionHub Checkout] Checkout closed after successful payment.",
+      );
+
+      return;
+
+    }
+
+
+    console.log(
+      "[ExtensionHub Checkout] User closed checkout without completing payment.",
+    );
+
+
+    if (
+      isMountedRef.current
+    ) {
+
+      setState(
+        "cancelled",
+      );
+
+    }
+
+
+    return;
+
+  }
+
+
+  /* ====================================================================== */
+  /* CHECKOUT ERROR                                                         */
+  /* ====================================================================== */
+
+  if (
+    event.name ===
+    "checkout.error"
+  ) {
+
+    console.error(
+      "[ExtensionHub Paddle] Checkout error:",
+      event.data,
+    );
+
+
+    if (
+      completionHandledRef.current
+    ) {
+
+      return;
+
+    }
+
+
+    if (
+      isMountedRef.current
+    ) {
+
+      setError(
+        "Something went wrong while processing the checkout.",
+      );
+
+
+      setErrorType(
+        "checkout_failed",
+      );
+
+
+      setState(
+        "error",
+      );
+
+    }
+
+
+    return;
+
+  }
+
+
+  /* ====================================================================== */
+  /* UNHANDLED EVENT                                                        */
+  /* ====================================================================== */
+
+  console.log(
+    "[ExtensionHub Paddle] Unhandled Paddle event:",
+    event.name,
+  );
+
+}
+  /* ======================================================================== */
+  /* HANDLE PAYMENT COMPLETION                                                */
+  /* ======================================================================== */
+
+  function handleCheckoutCompleted(
+    completedTransactionId: string,
+  ) {
+
+    /* ====================================================================== */
+    /* PREVENT DUPLICATE COMPLETION                                          */
+    /* ====================================================================== */
+
+    if (
+      completionHandledRef.current
+    ) {
+
+      console.log(
+        "[ExtensionHub Checkout] Payment completion already handled.",
+      );
+
+
+      return;
+
+    }
+
+
+    completionHandledRef.current =
+      true;
+
+
+    console.log(
+      "[ExtensionHub Checkout] Payment completed successfully.",
+    );
+
+
+    /* ====================================================================== */
+    /* UPDATE UI                                                             */
+    /* ====================================================================== */
+
+    if (
+      isMountedRef.current
+    ) {
+
+      setState(
+        "completed",
+      );
+
+    }
+
+
+    /* ====================================================================== */
+    /* PREVENT MULTIPLE REDIRECTS                                            */
+    /* ====================================================================== */
+
+    if (
+      redirectTimeoutRef.current
+    ) {
+
+      clearTimeout(
+        redirectTimeoutRef.current,
+      );
+
+    }
+
+
+    /* ====================================================================== */
+    /* REDIRECT TO SUCCESS PAGE                                              */
+    /* ====================================================================== */
+
+    redirectTimeoutRef.current =
+      setTimeout(
+        () => {
+
+          console.log(
+            "[ExtensionHub Checkout] Redirecting to success page.",
+          );
+
+
+          /*
+           * Close Paddle checkout overlay.
+           */
+          try {
+
+            paddleRef
+              .current
+              ?.Checkout
+              .close();
+
+          } catch (
+            closeError
+          ) {
+
+            console.warn(
+              "[ExtensionHub Checkout] Unable to close Paddle checkout:",
+              closeError,
+            );
+
+          }
+
+
+          /*
+           * Redirect to success page.
+           */
+          window.location.replace(
+            `/checkout/success?transaction=${encodeURIComponent(
+              completedTransactionId,
+            )}`,
+          );
+
+        },
+        SUCCESS_REDIRECT_DELAY,
+      );
+
+  }
+
+
+  /* ======================================================================== */
+  /* HANDLE ERRORS                                                            */
+  /* ======================================================================== */
+
+  function handleCheckoutError(
+    caughtError: unknown,
+  ) {
+
+    console.error(
+      "[ExtensionHub Checkout] Failed to start checkout:",
+      caughtError,
+    );
+
+
+    let message =
+      "Unable to start secure checkout.";
+
+
+    let type:
+      CheckoutError =
+      "checkout_failed";
+
+
+    if (
+      caughtError instanceof
+      CheckoutPageError
+    ) {
+
+      message =
+        caughtError.message;
+
+
+      type =
+        caughtError.type;
+
+    } else if (
+      caughtError instanceof
+      Error
+    ) {
+
+      message =
+        caughtError.message;
+
+    }
+
+
+    if (
+      !isMountedRef.current
+    ) {
+
+      return;
+
+    }
+
+
+    setError(
+      message,
+    );
+
+
+    setErrorType(
+      type,
+    );
+
+
+    setState(
+      "error",
+    );
+
+  }
+
+
+  /* ======================================================================== */
+  /* RETRY CHECKOUT                                                           */
+  /* ======================================================================== */
+
+  function retryCheckout() {
+
+    /*
+     * Do not retry if payment
+     * was already completed.
+     */
+    if (
+      completionHandledRef.current
+    ) {
+
+      return;
+
+    }
+
+
+    /*
+     * Reset checkout initialization.
+     */
+    checkoutStartedRef.current =
+      false;
+
+
+    paddleRef.current =
+      null;
+
+
+    setError(
+      null,
+    );
+
+
+    setErrorType(
+      null,
+    );
+
+
+    setState(
+      "loading",
+    );
+
+
+    /*
+     * Restart checkout.
+     */
+    void startCheckout();
+
+  }
+
+
+  /* ======================================================================== */
+  /* LOADING / OPENING UI                                                     */
   /* ======================================================================== */
 
   if (
@@ -569,34 +924,7 @@ export default function CheckoutPage() {
   ) {
 
     return (
-
-      <main
-        style={{
-          minHeight:
-            "100vh",
-
-          display:
-            "flex",
-
-          alignItems:
-            "center",
-
-          justifyContent:
-            "center",
-
-          background:
-            "#0f172a",
-
-          color:
-            "#ffffff",
-
-          fontFamily:
-            "Arial, sans-serif",
-
-          padding:
-            "24px",
-        }}
-      >
+      <CheckoutShell>
 
         <div
           style={{
@@ -665,30 +993,14 @@ export default function CheckoutPage() {
 
         </div>
 
-
-        <style>
-          {`
-            @keyframes spin {
-              from {
-                transform: rotate(0deg);
-              }
-
-              to {
-                transform: rotate(360deg);
-              }
-            }
-          `}
-        </style>
-
-      </main>
-
+      </CheckoutShell>
     );
 
   }
 
 
   /* ======================================================================== */
-  /* PAYMENT COMPLETED                                                        */
+  /* PAYMENT COMPLETED UI                                                     */
   /* ======================================================================== */
 
   if (
@@ -696,43 +1008,30 @@ export default function CheckoutPage() {
   ) {
 
     return (
-
-      <main
-        style={{
-          minHeight:
-            "100vh",
-
-          display:
-            "flex",
-
-          alignItems:
-            "center",
-
-          justifyContent:
-            "center",
-
-          background:
-            "#0f172a",
-
-          color:
-            "#ffffff",
-
-          fontFamily:
-            "Arial, sans-serif",
-
-          padding:
-            "24px",
-        }}
-      >
+      <CheckoutShell>
 
         <div
           style={{
             textAlign:
               "center",
+
             maxWidth:
               "600px",
-          }}
+            }}
         >
+
+          <div
+            style={{
+              fontSize:
+                "64px",
+
+              marginBottom:
+                "20px",
+            }}
+          >
+            ✓
+          </div>
+
 
           <h1>
             Payment successful!
@@ -745,76 +1044,98 @@ export default function CheckoutPage() {
                 "#94a3b8",
             }}
           >
-            Activating your AccessScan Pro subscription...
+            Preparing your AccessScan Pro subscription...
           </p>
 
         </div>
 
-      </main>
-
+      </CheckoutShell>
     );
 
   }
 
 
   /* ======================================================================== */
-  /* ERROR                                                                    */
+  /* CHECKOUT CANCELLED UI                                                    */
+  /* ======================================================================== */
+
+  if (
+    state === "cancelled"
+  ) {
+
+    return (
+      <CheckoutShell>
+
+        <CheckoutCard>
+
+          <div
+            style={{
+              fontSize:
+                "48px",
+
+              marginBottom:
+                "20px",
+            }}
+          >
+            ⓘ
+          </div>
+
+
+          <h1
+            style={{
+              margin:
+                "0 0 16px",
+            }}
+          >
+            Checkout cancelled
+          </h1>
+
+
+          <p
+            style={{
+              margin:
+                "0",
+
+              color:
+                "#cbd5e1",
+
+              lineHeight:
+                "1.6",
+            }}
+          >
+            Your payment was not completed.
+            You can safely try again.
+          </p>
+
+
+          <button
+            type="button"
+            onClick={
+              retryCheckout
+            }
+            style={
+              primaryButtonStyle
+            }
+          >
+            Try Again
+          </button>
+
+        </CheckoutCard>
+
+      </CheckoutShell>
+    );
+
+  }
+
+
+  /* ======================================================================== */
+  /* ERROR UI                                                                 */
   /* ======================================================================== */
 
   return (
+    <CheckoutShell>
 
-    <main
-      style={{
-        minHeight:
-          "100vh",
-
-        display:
-          "flex",
-
-        alignItems:
-          "center",
-
-        justifyContent:
-          "center",
-
-        background:
-          "#0f172a",
-
-        color:
-          "#ffffff",
-
-        fontFamily:
-          "Arial, sans-serif",
-
-        padding:
-          "24px",
-      }}
-    >
-
-      <div
-        style={{
-          maxWidth:
-            "650px",
-
-          width:
-            "100%",
-
-          padding:
-            "40px",
-
-          textAlign:
-            "center",
-
-          background:
-            "#172033",
-
-          borderRadius:
-            "16px",
-
-          border:
-            "1px solid #334155",
-        }}
-      >
+      <CheckoutCard>
 
         <div
           style={{
@@ -855,46 +1176,227 @@ export default function CheckoutPage() {
         </p>
 
 
-        <button
-          type="button"
-          onClick={() => {
+        {errorType ===
+        "missing_transaction"
+          ? (
+            <p
+              style={{
+                marginTop:
+                  "20px",
 
-            window.location.reload();
+                color:
+                  "#94a3b8",
 
-          }}
-          style={{
-            marginTop:
-              "28px",
+                fontSize:
+                  "14px",
+              }}
+            >
+              Please return to the AccessScan extension
+              and start checkout again.
+            </p>
+          )
+          : null}
 
-            padding:
-              "12px 24px",
 
-            border:
-              "none",
+        {errorType !==
+        "missing_transaction"
+          ? (
+            <button
+              type="button"
+              onClick={
+                retryCheckout
+              }
+              style={
+                primaryButtonStyle
+              }
+            >
+              Try Again
+            </button>
+          )
+          : null}
 
-            borderRadius:
-              "8px",
+      </CheckoutCard>
 
-            background:
-              "#3b82f6",
-
-            color:
-              "#ffffff",
-
-            cursor:
-              "pointer",
-
-            fontSize:
-              "16px",
-            }}
-        >
-          Try Again
-        </button>
-
-      </div>
-
-    </main>
-
+    </CheckoutShell>
   );
 
 }
+
+
+/* ========================================================================== */
+/* CUSTOM ERROR                                                               */
+/* ========================================================================== */
+
+class CheckoutPageError
+  extends Error {
+
+  public type:
+    CheckoutError;
+
+
+  constructor(
+    type:
+      CheckoutError,
+    message:
+      string,
+  ) {
+
+    super(
+      message,
+    );
+
+
+    this.name =
+      "CheckoutPageError";
+
+
+    this.type =
+      type;
+
+  }
+
+}
+
+
+/* ========================================================================== */
+/* REUSABLE PAGE SHELL                                                        */
+/* ========================================================================== */
+
+function CheckoutShell({
+  children,
+}: {
+  children:
+    React.ReactNode;
+}) {
+
+  return (
+    <main
+      style={{
+        minHeight:
+          "100vh",
+
+        display:
+          "flex",
+
+        alignItems:
+          "center",
+
+        justifyContent:
+          "center",
+
+        background:
+          "#0f172a",
+
+        color:
+          "#ffffff",
+
+        fontFamily:
+          "Arial, sans-serif",
+
+        padding:
+          "24px",
+      }}
+    >
+
+      {children}
+
+
+      <style>
+        {`
+          @keyframes spin {
+            from {
+              transform: rotate(0deg);
+            }
+
+            to {
+              transform: rotate(360deg);
+            }
+          }
+        `}
+      </style>
+
+    </main>
+  );
+
+}
+
+
+/* ========================================================================== */
+/* REUSABLE CARD                                                              */
+/* ========================================================================== */
+
+function CheckoutCard({
+  children,
+}: {
+  children:
+    React.ReactNode;
+}) {
+
+  return (
+    <div
+      style={{
+        maxWidth:
+          "650px",
+
+        width:
+          "100%",
+
+        padding:
+          "40px",
+
+        textAlign:
+          "center",
+
+        background:
+          "#172033",
+
+        borderRadius:
+          "16px",
+
+        border:
+          "1px solid #334155",
+
+        boxShadow:
+          "0 20px 50px rgba(0, 0, 0, 0.35)",
+      }}
+    >
+
+      {children}
+
+    </div>
+  );
+
+}
+
+
+/* ========================================================================== */
+/* BUTTON STYLE                                                               */
+/* ========================================================================== */
+
+const primaryButtonStyle = {
+
+  marginTop:
+    "28px",
+
+  padding:
+    "12px 24px",
+
+  border:
+    "none",
+
+  borderRadius:
+    "8px",
+
+  background:
+    "#3b82f6",
+
+  color:
+    "#ffffff",
+
+  cursor:
+    "pointer",
+
+  fontSize:
+    "16px",
+
+};
