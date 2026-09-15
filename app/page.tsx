@@ -231,16 +231,16 @@ export default function Home() {
           </div>
 
           <div className="flex flex-wrap gap-5 text-sm text-slate-400">
-            <a href="#terms" className="transition hover:text-white">
+            <a href="/terms" className="transition hover:text-white">
               Terms of Service
             </a>
 
-            <a href="#privacy" className="transition hover:text-white">
-              Privacy Notice
+            <a href="/privacy" className="transition hover:text-white">
+               Privacy Notice
             </a>
 
-            <a href="#refund-policy" className="transition hover:text-white">
-              Refund Policy
+            <a href="/refund" className="transition hover:text-white">
+               Refund Policy
             </a>
           </div>
         </div>
