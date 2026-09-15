@@ -1,239 +1,237 @@
 "use client";
 
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
 } from "react";
 
-
 /* ========================================================================== */
 /* CHECKOUT SUCCESS PAGE                                                      */
 /* ========================================================================== */
 
-export default function CheckoutSuccessPage() {
+const ACCESSSCAN_EXTENSION_ID =
+  "kboajclcikaacjahplodipielkpoogef";
 
+type ChromeRuntimeApi = {
+  sendMessage?: (
+    extensionId: string,
+    message: {
+      type: "CLOSE_CHECKOUT_TAB";
+    },
+  ) => Promise<unknown>;
+};
+
+type ChromeApi = {
+  runtime?: ChromeRuntimeApi;
+};
+
+export default function CheckoutSuccessPage() {
   /* ======================================================================== */
   /* STATE                                                                    */
   /* ======================================================================== */
 
-  const [
-    countdown,
-    setCountdown,
-  ] =
-    useState(
-      5,
-    );
+  const [countdown, setCountdown] =
+    useState(5);
 
+  /* ======================================================================== */
+  /* REFS                                                                     */
+  /* ======================================================================== */
 
   /*
-   * Tracks whether the close process
-   * has already started.
+   * Prevents overlapping close requests caused by a rapid double click or
+   * by the automatic countdown firing at the same time as a manual click.
    */
-  const closeAttemptedRef =
-    useRef(
-      false,
-    );
-
+  const closeInProgressRef =
+    useRef(false);
 
   /*
-   * Tracks whether the component
-   * is still mounted.
+   * Stores the browser interval ID so the close function can clear the
+   * countdown regardless of whether it was triggered automatically or
+   * manually.
+   */
+  const intervalRef =
+    useRef<number | null>(null);
+
+  /*
+   * Tracks whether the component is still mounted before updating state.
    */
   const isMountedRef =
-    useRef(
-      true,
-    );
-
+    useRef(true);
 
   /* ======================================================================== */
-  /* COUNTDOWN + WINDOW CLOSE                                                 */
+  /* CLOSE CHECKOUT TAB                                                       */
   /* ======================================================================== */
 
-  useEffect(
-    () => {
-
-      isMountedRef.current =
-        true;
-
-
-      /*
-       * IMPORTANT:
-       *
-       * window.setInterval() returns a number
-       * in the browser.
-       *
-       * This avoids the NodeJS.Timeout TypeScript
-       * error during Next.js build.
-       */
-      let intervalId:
-        number | null =
-        null;
-
-
-      /*
-       * Close the checkout tab.
-       */
-      function closeCheckoutWindow() {
-
-        /*
-         * Prevent duplicate close attempts.
-         */
-        if (
-          closeAttemptedRef.current
-        ) {
-
-          return;
-
-        }
-
-
-        closeAttemptedRef.current =
-          true;
-
-
-        console.log(
-          "[ExtensionHub Checkout] Success countdown completed.",
-        );
-
-
-        /*
-         * Clear interval before closing.
-         */
-        if (
-          intervalId !== null
-        ) {
-
-          window.clearInterval(
-            intervalId,
-          );
-
-
-          intervalId =
-            null;
-
-        }
-
-
-        /*
-         * Attempt to close the current tab.
-         *
-         * The tab was opened from the Chrome extension,
-         * so window.close() may work depending on how
-         * Chrome created the tab.
-         */
-        console.log(
-          "[ExtensionHub Checkout] Attempting to close checkout window.",
-        );
-
-
-        window.close();
-
-
-        /*
-         * IMPORTANT:
-         *
-         * Browsers may block window.close()
-         * if the tab was not opened directly using
-         * window.open().
-         *
-         * In that case, the success page remains open
-         * and the user can manually close it.
-         *
-         * We intentionally do not redirect the user
-         * because AccessScan is the primary application.
-         */
-
+  const closeCheckoutWindow =
+    useCallback(() => {
+      if (
+        closeInProgressRef.current
+      ) {
+        return;
       }
 
+      closeInProgressRef.current =
+        true;
+
+      console.info(
+        "[ExtensionHub Checkout] Attempting to close checkout tab.",
+      );
 
       /*
-       * Start countdown.
+       * Stop the automatic countdown immediately.
        */
-      intervalId =
-        window.setInterval(
-          () => {
-
-            setCountdown(
-              (
-                current,
-              ) => {
-
-                /*
-                 * Stop when countdown reaches zero.
-                 */
-                if (
-                  current <= 1
-                ) {
-
-                  /*
-                   * Execute close outside
-                   * React state update lifecycle.
-                   */
-                  window.setTimeout(
-                    () => {
-
-                      closeCheckoutWindow();
-
-                    },
-                    0,
-                  );
-
-
-                  return 0;
-
-                }
-
-
-                return (
-                  current - 1
-                );
-
-              },
-            );
-
-          },
-          1000,
+      if (
+        intervalRef.current !== null
+      ) {
+        window.clearInterval(
+          intervalRef.current,
         );
 
+        intervalRef.current = null;
+      }
 
-      /* ==================================================================== */
-      /* CLEANUP                                                              */
-      /* ==================================================================== */
+      /*
+       * The checkout was opened by the AccessScan extension with
+       * chrome.tabs.create(). Therefore window.close() is normally blocked
+       * by Chrome. Ask the extension background service to close the
+       * current sender tab instead.
+       */
+      try {
+        const chromeApi =
+          (
+            globalThis as typeof globalThis & {
+              chrome?: ChromeApi;
+            }
+          ).chrome;
 
-      return () => {
-
-        isMountedRef.current =
-          false;
-
+        const sendMessage =
+          chromeApi
+            ?.runtime
+            ?.sendMessage;
 
         if (
-          intervalId !== null
+          typeof sendMessage ===
+          "function"
         ) {
+          void sendMessage(
+            ACCESSSCAN_EXTENSION_ID,
+            {
+              type:
+                "CLOSE_CHECKOUT_TAB",
+            },
+          )
+            .then(() => {
+              console.info(
+                "[ExtensionHub Checkout] Checkout tab close request sent to AccessScan.",
+              );
+            })
+            .catch((error) => {
+              console.warn(
+                "[ExtensionHub Checkout] AccessScan close request was not delivered.",
+                error,
+              );
 
-          window.clearInterval(
-            intervalId,
-          );
+              /*
+               * Chrome may still permit window.close() in some contexts.
+               * Keep it as a best-effort fallback.
+               */
+              closeInProgressRef.current =
+                false;
 
+              window.close();
+            });
 
-          intervalId =
-            null;
+          return;
+        }
+      } catch (error) {
+        console.warn(
+          "[ExtensionHub Checkout] AccessScan close request failed.",
+          error,
+        );
+      }
 
+      /*
+       * Fallback when the Chrome extension API is unavailable.
+       */
+      closeInProgressRef.current =
+        false;
+
+      window.close();
+    }, []);
+
+  /* ======================================================================== */
+  /* COUNTDOWN + AUTOMATIC CLOSE                                              */
+  /* ======================================================================== */
+
+  useEffect(() => {
+    isMountedRef.current =
+      true;
+
+    /*
+     * Start the five-second countdown.
+     */
+    intervalRef.current =
+      window.setInterval(() => {
+        if (
+          !isMountedRef.current
+        ) {
+          return;
         }
 
-      };
+        setCountdown(
+          (current) => {
+            if (
+              current <= 1
+            ) {
+              /*
+               * Execute the close request outside the state updater.
+               * This keeps side effects out of React's state calculation.
+               */
+              window.setTimeout(() => {
+                if (
+                  isMountedRef.current
+                ) {
+                  console.info(
+                    "[ExtensionHub Checkout] Success countdown completed.",
+                  );
 
-    },
-    [],
-  );
+                  closeCheckoutWindow();
+                }
+              }, 0);
 
+              return 0;
+            }
+
+            return current - 1;
+          },
+        );
+      }, 1000);
+
+    return () => {
+      isMountedRef.current =
+        false;
+
+      if (
+        intervalRef.current !== null
+      ) {
+        window.clearInterval(
+          intervalRef.current,
+        );
+
+        intervalRef.current = null;
+      }
+    };
+  }, [
+    closeCheckoutWindow,
+  ]);
 
   /* ======================================================================== */
   /* UI                                                                       */
   /* ======================================================================== */
 
   return (
-
     <main
       style={{
         minHeight:
@@ -261,7 +259,6 @@ export default function CheckoutSuccessPage() {
           "24px",
       }}
     >
-
       <div
         style={{
           width:
@@ -289,7 +286,6 @@ export default function CheckoutSuccessPage() {
             "0 20px 50px rgba(0, 0, 0, 0.35)",
         }}
       >
-
         {/* ================================================================ */}
         {/* SUCCESS ICON                                                     */}
         {/* ================================================================ */}
@@ -333,9 +329,8 @@ export default function CheckoutSuccessPage() {
           ✓
         </div>
 
-
         {/* ================================================================ */}
-        {/* TITLE                                                            */}
+        {/* TITLE                                                             */}
         {/* ================================================================ */}
 
         <h1
@@ -353,9 +348,8 @@ export default function CheckoutSuccessPage() {
           Payment successful!
         </h1>
 
-
         {/* ================================================================ */}
-        {/* DESCRIPTION                                                      */}
+        {/* DESCRIPTION                                                       */}
         {/* ================================================================ */}
 
         <p
@@ -377,9 +371,8 @@ export default function CheckoutSuccessPage() {
           has been activated successfully.
         </p>
 
-
         {/* ================================================================ */}
-        {/* COUNTDOWN                                                        */}
+        {/* COUNTDOWN                                                         */}
         {/* ================================================================ */}
 
         <div
@@ -406,7 +399,6 @@ export default function CheckoutSuccessPage() {
               "16px",
           }}
         >
-
           This window will close automatically in{" "}
 
           <strong
@@ -422,13 +414,13 @@ export default function CheckoutSuccessPage() {
           </strong>
 
           {" "}second
-          {countdown !== 1 ? "s" : ""}.
-
+          {countdown !== 1
+            ? "s"
+            : ""}.
         </div>
 
-
         {/* ================================================================ */}
-        {/* FALLBACK INFORMATION                                             */}
+        {/* FALLBACK INFORMATION                                              */}
         {/* ================================================================ */}
 
         <p
@@ -452,21 +444,15 @@ export default function CheckoutSuccessPage() {
           You can now return to the AccessScan extension.
         </p>
 
-
         {/* ================================================================ */}
-        {/* MANUAL CLOSE BUTTON                                              */}
+        {/* MANUAL CLOSE BUTTON                                               */}
         {/* ================================================================ */}
 
         <button
           type="button"
-          onClick={() => {
-
-            /*
-             * Manual close attempt.
-             */
-            window.close();
-
-          }}
+          onClick={
+            closeCheckoutWindow
+          }
           style={{
             marginTop:
               "24px",
@@ -495,11 +481,7 @@ export default function CheckoutSuccessPage() {
         >
           Close Window
         </button>
-
       </div>
-
     </main>
-
   );
-
 }
